@@ -12,12 +12,14 @@
 
 TIME_STEP = 64;
 
+
+
 %parfor id = 1:2
 emitter = wb_robot_get_device('emitter');
 wb_emitter_set_range(emitter, -1);
 receiver = wb_robot_get_device('receiver');
 wb_receiver_enable(receiver, TIME_STEP);
-data = [num2str(0) ',' num2str(0) ];
+%data = [num2str(0) ',' num2str(0) ];
 id = str2num(wb_robot_get_name());
 
 
@@ -48,7 +50,6 @@ comm_flag = 0;%will be flipped to 1 if communication happening
 done = 0;
 
 %% pre-processing -- K-means clustering for partitioining the region.
-id = 1;
 [idx,centr] = find_partitions(num_robot,size,0);% params: (robot#,size,display_flag)
 
 %% create a GRID world
@@ -115,7 +116,7 @@ Y_gt = str2double(reshape(table2array(data_gt),[size*size 1]));
 X_train = (1:size*size)';
 x_active = randsample(X_train,ceil(init_trn_data*size*size));%select 10% random points to initialize GP hyperparameters.
 init_training_locs = all_locs(x_active,:);% initial locs to initialize the hyperparameters.
-y_active = Y_gt(x_active);% meausurements of the initial training locs.
+y_active = Y_gt(x_active)+normrnd(0,sigma);% meausurements of the initial training locs.
 unseen = setdiff(unseen,init_training_locs,'rows');% unseen locations in the environment (includes other robot states).
 unseen_idx = setdiff(X_train,x_active);
 
@@ -125,13 +126,13 @@ sigma0 = std(y_active);
 %ypred = resubPredict(gprMdl);% not actually needed -- just for testing.
 
 %% add the starting location to the training matrix and do the 1st prediction
-y_gt = Y_gt(state2idx(GW,GW.CurrentState));%measure the data at the i-th location.
+y_gt = Y_gt(state2idx(GW,GW.CurrentState))+normrnd(0,sigma);%measure the data at the i-th location.
 [currrow,currcol] = state2rc(GW.CurrentState);
 %newData = {currrow,currcol,y_gt};
 %attributes = [attributes;newData];
 x_active(numel(x_active)+1) = state2idx(GW,GW.CurrentState);%add the new visited state for retraining.
 x_active = unique(x_active,'stable');%keep unique locations
-y_active = Y_gt(x_active);%add the new measurement for retraining.
+y_active = Y_gt(x_active)+normrnd(0,sigma);%add the new measurement for retraining.
 train_locs = init_training_locs;
 train_locs = unique(train_locs,'rows','stable');
 if numel(intersect(train_locs, [currrow,currcol],'rows'))==0
@@ -207,6 +208,7 @@ while wb_robot_step(TIME_STEP) ~= -1
     %% The main loop -- runs till there is budget left.
     reset_counter = 0;
     while budget > 0 %&& GW.CurrentState ~= GW.TerminalStates
+        wb_console_print('Another round...', WB_STDOUT );
         if comm_flag==0
             %fprintf("budget left: %d\n",budget);
             [row,col] = state2rc(GW.CurrentState);
@@ -236,12 +238,12 @@ while wb_robot_step(TIME_STEP) ~= -1
             %y_gt = Y_gt(state2idx(GW,GW.CurrentState));%measure the data at the i-th location.
             x_active(numel(x_active)+1) = state2idx(GW,GW.CurrentState);%add the new visited state for retraining.
             x_active = unique(x_active,'stable');%keep unique locations
-            y_active = Y_gt(x_active);%add the new measurement for retraining.
+            y_active = Y_gt(x_active)+normrnd(0,sigma);%add the new measurement for retraining.
             %unseen = setdiff(X_train,x_active);
             if numel(intersect(train_locs, [newrow, newcol],'rows'))==0
                 train_locs = [train_locs; newrow newcol];
             end
-            Vtilde = [Vtilde; state2idx(GW,GW.CurrentState) Y_gt(state2idx(GW,GW.CurrentState)) newrow newcol];% this data will be shared with the others
+            Vtilde = [Vtilde; state2idx(GW,GW.CurrentState) Y_gt(state2idx(GW,GW.CurrentState))+normrnd(0,sigma) newrow newcol];% this data will be shared with the others
             %y_active = [y_active; Y_gt(state2idx(GW,GW.CurrentState))];
             unseen = setdiff(all_locs,train_locs,'rows','stable');
             unseen_idx = setdiff(X_train,x_active,'stable');
@@ -250,16 +252,16 @@ while wb_robot_step(TIME_STEP) ~= -1
                 % TO-Do Webots comm here to check if I have any neighbors.
                 % update comm_robots
                 wb_emitter_send(emitter, double(data));
-                while wb_robot_step(TIME_STEP) ~= -1 & done == 0
+                while wb_robot_step(TIME_STEP) ~= -1 && done == 0
                     queue_length = wb_receiver_get_queue_length(receiver);
                     if queue_length > 0 % message detected
-                        done = 1;
                         %% get the next message
                         msg = wb_receiver_get_data(receiver, 'double');
                         msg = char(msg)'; % convert message back to string
                         wb_receiver_next_packet(receiver);
                         disp([num2str(id), 'received: ', msg]);
                     end
+                    done = 1;
                 end
                 msg = regexp(msg, ',', 'split');
                 neigh_row = str2double(msg{2}); neigh_col=str2double(msg{3});
@@ -316,6 +318,7 @@ while wb_robot_step(TIME_STEP) ~= -1
                 % share local meaurements, and then calculate likelihoods using Pat's logni's, and finally share the likelihoods.
                 % assume that you have stored the received data in VtilAll -- using
                 % Pat's code here (should be done inside MATLAB)... let c_n denote the number of communicataing robots
+                c_n = length(comm_robots);
                 gStar = communication(Vtilde,id, c_n, comm_robots);
                 % For path planning from here, treat
                 %   gStar(:,1) as the posterior mean of all M*N cells
@@ -352,7 +355,7 @@ while wb_robot_step(TIME_STEP) ~= -1
         ylabel('Posterior Variance','FontSize',12);
         xlabel('Path length','FontSize',12);
         %end
-        
+        break;
         
         % read the sensors, e.g.:
         %  rgb = wb_camera_get_image(camera);
@@ -366,5 +369,6 @@ while wb_robot_step(TIME_STEP) ~= -1
         %drawnow;
         
     end
+end
     
     % cleanup code goes here: write data to files, etc.
